@@ -34,6 +34,11 @@
     cursor: pointer;
   }
   button:active { opacity: 0.8; }
+  button.secondary {
+    background: transparent;
+    color: #f4f1ea;
+    border: 1px solid rgba(244,241,234,0.5);
+  }
   #fileInput { display: none; }
   .legend {
     background: rgba(255,255,255,0.95);
@@ -44,7 +49,7 @@
     line-height: 1.7;
   }
   .legend div { display: flex; align-items: center; gap: 6px; }
-  .dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; border: 1px solid rgba(0,0,0,0.3); }
+  .dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; border: 1px solid rgba(0,0,0,0.3); flex-shrink: 0; }
   .status {
     position: absolute;
     bottom: 10px;
@@ -67,6 +72,65 @@
     border-radius: 10px;
     margin-top: 4px;
   }
+
+  /* Species filter panel */
+  #speciesPanel {
+    position: absolute;
+    top: 74px;
+    right: 10px;
+    z-index: 600;
+    background: rgba(255,255,255,0.97);
+    border-radius: 8px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+    width: 230px;
+    max-height: 70vh;
+    display: none;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #speciesPanel.open { display: flex; }
+  .species-header {
+    padding: 10px 12px 6px;
+    font-size: 12.5px;
+    font-weight: 700;
+    color: #2f3e2f;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid #e7e2d6;
+  }
+  .species-actions {
+    display: flex;
+    gap: 6px;
+    padding: 6px 12px;
+  }
+  .species-actions button {
+    flex: 1;
+    padding: 5px 0;
+    font-size: 11px;
+    background: #eee8da;
+  }
+  .species-list {
+    overflow-y: auto;
+    padding: 4px 4px 8px;
+  }
+  .species-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    font-size: 12.5px;
+    color: #2f3e2f;
+    border-radius: 6px;
+  }
+  .species-row:active { background: #f0ede3; }
+  .species-row input { width: 15px; height: 15px; flex-shrink: 0; }
+  .species-row .count {
+    margin-left: auto;
+    font-size: 10.5px;
+    color: #888;
+    font-weight: 600;
+  }
 </style>
 </head>
 <body>
@@ -77,12 +141,26 @@
     <p id="subtitle">No data loaded yet</p>
   </div>
   <div class="controls">
+    <button id="speciesBtn" class="secondary">Species</button>
     <button id="loadBtn">Load Data</button>
     <input type="file" id="fileInput" accept="application/json,.json">
   </div>
 </header>
 
 <div id="map"></div>
+
+<div id="speciesPanel">
+  <div class="species-header">
+    <span>Filter by species</span>
+    <span style="cursor:pointer; font-weight:400; opacity:0.6;" id="closeSpeciesPanel">✕</span>
+  </div>
+  <div class="species-actions">
+    <button id="selectAllBtn">All</button>
+    <button id="selectNoneBtn">None</button>
+  </div>
+  <div class="species-list" id="speciesList"></div>
+</div>
+
 <div class="status" id="statusBox">Tap "Load Data" and choose your flora-data.json export to plot sightings.</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
@@ -117,14 +195,57 @@ let hullLayer = L.layerGroup().addTo(map);
 
 const STORAGE_KEY = 'floraLogData';
 
-function renderData(sightings) {
+let allSightings = [];          // full dataset as loaded
+let activeSpecies = new Set();  // species currently shown
+
+function speciesSortKey(s) { return s.toLowerCase(); }
+
+function buildSpeciesPanel(withCoords) {
+  const counts = {};
+  withCoords.forEach(s => {
+    counts[s.species] = (counts[s.species] || 0) + 1;
+  });
+  const speciesNames = Object.keys(counts).sort((a, b) => speciesSortKey(a).localeCompare(speciesSortKey(b)));
+
+  // Default: if activeSpecies is empty (first load), everything is active
+  if (activeSpecies.size === 0) {
+    speciesNames.forEach(sp => activeSpecies.add(sp));
+  }
+
+  const list = document.getElementById('speciesList');
+  list.innerHTML = '';
+  speciesNames.forEach(sp => {
+    const sample = withCoords.find(s => s.species === sp);
+    const color = categoryColors[sample.category] || '#555';
+    const row = document.createElement('label');
+    row.className = 'species-row';
+    row.innerHTML = `
+      <input type="checkbox" data-species="${sp.replace(/"/g, '&quot;')}" ${activeSpecies.has(sp) ? 'checked' : ''}>
+      <span class="dot" style="background:${color}"></span>
+      <span>${sp}</span>
+      <span class="count">${counts[sp]}</span>
+    `;
+    list.appendChild(row);
+  });
+
+  list.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const sp = cb.getAttribute('data-species');
+      if (cb.checked) activeSpecies.add(sp);
+      else activeSpecies.delete(sp);
+      redrawMarkers();
+    });
+  });
+}
+
+function redrawMarkers() {
   markerLayer.clearLayers();
   hullLayer.clearLayers();
 
-  const withCoords = sightings.filter(s => typeof s.lat === 'number' && typeof s.lng === 'number');
-  const skipped = sightings.length - withCoords.length;
+  const withCoords = allSightings.filter(s => typeof s.lat === 'number' && typeof s.lng === 'number');
+  const visible = withCoords.filter(s => activeSpecies.has(s.species));
 
-  withCoords.forEach(s => {
+  visible.forEach(s => {
     const color = categoryColors[s.category] || '#555';
     const marker = L.circleMarker([s.lat, s.lng], {
       radius: 9,
@@ -143,13 +264,13 @@ function renderData(sightings) {
   });
 
   const bySpecies = {};
-  withCoords.forEach(s => {
+  visible.forEach(s => {
     if (!bySpecies[s.species]) bySpecies[s.species] = [];
     bySpecies[s.species].push([s.lat, s.lng]);
   });
   Object.entries(bySpecies).forEach(([species, pts]) => {
     if (pts.length > 1) {
-      const sample = withCoords.find(s => s.species === species);
+      const sample = visible.find(s => s.species === species);
       const color = categoryColors[sample.category] || '#555';
       L.polygon(pts, {
         color: color,
@@ -160,13 +281,24 @@ function renderData(sightings) {
     }
   });
 
+  const skipped = allSightings.length - withCoords.length;
+  document.getElementById('subtitle').textContent =
+    `${visible.length} shown of ${withCoords.length} plotted` + (skipped > 0 ? ` · ${skipped} missing coordinates` : '');
+}
+
+function renderData(sightings) {
+  allSightings = sightings;
+  activeSpecies = new Set(); // reset so buildSpeciesPanel defaults to "all" for a fresh load
+  const withCoords = sightings.filter(s => typeof s.lat === 'number' && typeof s.lng === 'number');
+
+  buildSpeciesPanel(withCoords);
+  redrawMarkers();
+
   if (withCoords.length > 0) {
     const bounds = L.latLngBounds(withCoords.map(s => [s.lat, s.lng]));
     map.fitBounds(bounds.pad(0.3));
   }
 
-  document.getElementById('subtitle').textContent =
-    `${withCoords.length} plotted` + (skipped > 0 ? ` · ${skipped} missing coordinates` : '');
   document.getElementById('statusBox').textContent =
     `Loaded ${sightings.length} sightings (${withCoords.length} on map). Tap "Load Data" to refresh with a newer export.`;
 }
@@ -206,6 +338,29 @@ document.getElementById('fileInput').addEventListener('change', (e) => {
     }
   };
   reader.readAsText(file);
+});
+
+// Species panel toggle
+const speciesPanel = document.getElementById('speciesPanel');
+document.getElementById('speciesBtn').addEventListener('click', () => {
+  speciesPanel.classList.toggle('open');
+});
+document.getElementById('closeSpeciesPanel').addEventListener('click', () => {
+  speciesPanel.classList.remove('open');
+});
+document.getElementById('selectAllBtn').addEventListener('click', () => {
+  document.querySelectorAll('#speciesList input[type="checkbox"]').forEach(cb => {
+    cb.checked = true;
+    activeSpecies.add(cb.getAttribute('data-species'));
+  });
+  redrawMarkers();
+});
+document.getElementById('selectNoneBtn').addEventListener('click', () => {
+  document.querySelectorAll('#speciesList input[type="checkbox"]').forEach(cb => {
+    cb.checked = false;
+    activeSpecies.delete(cb.getAttribute('data-species'));
+  });
+  redrawMarkers();
 });
 </script>
 
