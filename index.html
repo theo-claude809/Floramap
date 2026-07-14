@@ -134,6 +134,13 @@
     color: #888;
     font-weight: 600;
   }
+  .species-row .swatch {
+    width: 9px;
+    height: 9px;
+    border-radius: 2px;
+    flex-shrink: 0;
+    border: 1px solid rgba(0,0,0,0.25);
+  }
 </style>
 </head>
 <body>
@@ -177,6 +184,22 @@ const categoryColors = {
   unsure: '#7f8c8d'
 };
 
+// Deterministic per-species color (independent of category), so overlapping
+// range outlines for different plants are visually distinguishable.
+const speciesColorCache = {};
+function speciesColor(name) {
+  if (speciesColorCache[name]) return speciesColorCache[name];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = name.charCodeAt(i) + ((hash << 5) - hash);
+    hash |= 0;
+  }
+  const hue = Math.abs(hash) % 360;
+  const color = `hsl(${hue}, 68%, 40%)`;
+  speciesColorCache[name] = color;
+  return color;
+}
+
 const map = L.map('map', { zoomControl: true }).setView([40.5115, -75.3890], 15);
 
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -194,8 +217,9 @@ legend.onAdd = function () {
 };
 legend.addTo(map);
 
-let markerLayer = L.layerGroup().addTo(map);
+// Hull layer added BEFORE marker layer so markers render on top and stay tappable.
 let hullLayer = L.layerGroup().addTo(map);
+let markerLayer = L.layerGroup().addTo(map);
 
 const STORAGE_KEY = 'floraLogData';
 
@@ -261,13 +285,11 @@ function buildSpeciesPanel(withCoords) {
   const list = document.getElementById('speciesList');
   list.innerHTML = '';
   speciesNames.forEach(sp => {
-    const sample = withCoords.find(s => s.species === sp);
-    const color = categoryColors[sample.category] || '#555';
     const row = document.createElement('label');
     row.className = 'species-row';
     row.innerHTML = `
       <input type="checkbox" data-species="${sp.replace(/"/g, '&quot;')}" ${activeSpecies.has(sp) ? 'checked' : ''}>
-      <span class="dot" style="background:${color}"></span>
+      <span class="swatch" style="background:${speciesColor(sp)}"></span>
       <span>${sp}</span>
       <span class="count">${counts[sp]}</span>
     `;
@@ -291,6 +313,36 @@ function redrawMarkers() {
   const withCoords = allSightings.filter(s => typeof s.lat === 'number' && typeof s.lng === 'number');
   const visible = withCoords.filter(s => activeSpecies.has(s.species));
 
+  if (showRanges) {
+    const bySpecies = {};
+    visible.forEach(s => {
+      if (!bySpecies[s.species]) bySpecies[s.species] = [];
+      bySpecies[s.species].push([s.lat, s.lng]);
+    });
+    Object.entries(bySpecies).forEach(([species, pts]) => {
+      if (pts.length < 2) return;
+      const color = speciesColor(species);
+      const hullPts = pts.length === 2 ? pts : convexHull(pts);
+      // interactive: false lets taps/clicks pass through to the markers underneath
+      if (hullPts.length === 2) {
+        L.polyline(hullPts, {
+          color: color,
+          weight: 1.5,
+          dashArray: '4,4',
+          interactive: false
+        }).addTo(hullLayer);
+      } else {
+        L.polygon(hullPts, {
+          color: color,
+          weight: 1.5,
+          dashArray: '4,4',
+          fillOpacity: 0.07,
+          interactive: false
+        }).addTo(hullLayer);
+      }
+    });
+  }
+
   visible.forEach(s => {
     const color = categoryColors[s.category] || '#555';
     const marker = L.circleMarker([s.lat, s.lng], {
@@ -308,35 +360,6 @@ function redrawMarkers() {
     `);
     markerLayer.addLayer(marker);
   });
-
-  if (showRanges) {
-    const bySpecies = {};
-    visible.forEach(s => {
-      if (!bySpecies[s.species]) bySpecies[s.species] = [];
-      bySpecies[s.species].push([s.lat, s.lng]);
-    });
-    Object.entries(bySpecies).forEach(([species, pts]) => {
-      if (pts.length < 2) return;
-      const sample = visible.find(s => s.species === species);
-      const color = categoryColors[sample.category] || '#555';
-      const hullPts = pts.length === 2 ? pts : convexHull(pts);
-      if (hullPts.length === 2) {
-        // Just two points (or a degenerate hull) — draw a connecting line instead of a filled shape
-        L.polyline(hullPts, {
-          color: color,
-          weight: 1.5,
-          dashArray: '4,4'
-        }).addTo(hullLayer);
-      } else {
-        L.polygon(hullPts, {
-          color: color,
-          weight: 1.5,
-          dashArray: '4,4',
-          fillOpacity: 0.07
-        }).addTo(hullLayer);
-      }
-    });
-  }
 
   const skipped = allSightings.length - withCoords.length;
   document.getElementById('subtitle').textContent =
