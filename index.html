@@ -39,6 +39,9 @@
     color: #f4f1ea;
     border: 1px solid rgba(244,241,234,0.5);
   }
+  button.secondary.active {
+    background: rgba(244,241,234,0.25);
+  }
   #fileInput { display: none; }
   .legend {
     background: rgba(255,255,255,0.95);
@@ -141,6 +144,7 @@
     <p id="subtitle">No data loaded yet</p>
   </div>
   <div class="controls">
+    <button id="rangeBtn" class="secondary active">Ranges</button>
     <button id="speciesBtn" class="secondary">Species</button>
     <button id="loadBtn">Load Data</button>
     <input type="file" id="fileInput" accept="application/json,.json">
@@ -197,8 +201,50 @@ const STORAGE_KEY = 'floraLogData';
 
 let allSightings = [];          // full dataset as loaded
 let activeSpecies = new Set();  // species currently shown
+let showRanges = true;          // range-polygon toggle
 
 function speciesSortKey(s) { return s.toLowerCase(); }
+
+// --- Convex hull (Andrew's monotone chain) ---
+// Points passed as [lat, lng]; treats lng as x, lat as y for the geometric sort/cross product.
+function cross(o, a, b) {
+  return (a[1] - o[1]) * (b[0] - o[0]) - (a[0] - o[0]) * (b[1] - o[1]);
+}
+
+function convexHull(points) {
+  // De-duplicate identical points
+  const uniq = [];
+  const seen = new Set();
+  points.forEach(p => {
+    const key = p[0].toFixed(7) + ',' + p[1].toFixed(7);
+    if (!seen.has(key)) { seen.add(key); uniq.push(p); }
+  });
+
+  if (uniq.length < 3) return uniq; // 0, 1, or 2 points: nothing to hull, caller handles it
+
+  const sorted = uniq.slice().sort((a, b) => (a[1] - b[1]) || (a[0] - b[0]));
+
+  const lower = [];
+  for (const p of sorted) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
+      lower.pop();
+    }
+    lower.push(p);
+  }
+
+  const upper = [];
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const p = sorted[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
+      upper.pop();
+    }
+    upper.push(p);
+  }
+
+  lower.pop();
+  upper.pop();
+  return lower.concat(upper);
+}
 
 function buildSpeciesPanel(withCoords) {
   const counts = {};
@@ -263,23 +309,34 @@ function redrawMarkers() {
     markerLayer.addLayer(marker);
   });
 
-  const bySpecies = {};
-  visible.forEach(s => {
-    if (!bySpecies[s.species]) bySpecies[s.species] = [];
-    bySpecies[s.species].push([s.lat, s.lng]);
-  });
-  Object.entries(bySpecies).forEach(([species, pts]) => {
-    if (pts.length > 1) {
+  if (showRanges) {
+    const bySpecies = {};
+    visible.forEach(s => {
+      if (!bySpecies[s.species]) bySpecies[s.species] = [];
+      bySpecies[s.species].push([s.lat, s.lng]);
+    });
+    Object.entries(bySpecies).forEach(([species, pts]) => {
+      if (pts.length < 2) return;
       const sample = visible.find(s => s.species === species);
       const color = categoryColors[sample.category] || '#555';
-      L.polygon(pts, {
-        color: color,
-        weight: 1.5,
-        dashArray: '4,4',
-        fillOpacity: 0.07
-      }).addTo(hullLayer);
-    }
-  });
+      const hullPts = pts.length === 2 ? pts : convexHull(pts);
+      if (hullPts.length === 2) {
+        // Just two points (or a degenerate hull) — draw a connecting line instead of a filled shape
+        L.polyline(hullPts, {
+          color: color,
+          weight: 1.5,
+          dashArray: '4,4'
+        }).addTo(hullLayer);
+      } else {
+        L.polygon(hullPts, {
+          color: color,
+          weight: 1.5,
+          dashArray: '4,4',
+          fillOpacity: 0.07
+        }).addTo(hullLayer);
+      }
+    });
+  }
 
   const skipped = allSightings.length - withCoords.length;
   document.getElementById('subtitle').textContent =
@@ -338,6 +395,14 @@ document.getElementById('fileInput').addEventListener('change', (e) => {
     }
   };
   reader.readAsText(file);
+});
+
+// Range polygon toggle
+const rangeBtn = document.getElementById('rangeBtn');
+rangeBtn.addEventListener('click', () => {
+  showRanges = !showRanges;
+  rangeBtn.classList.toggle('active', showRanges);
+  redrawMarkers();
 });
 
 // Species panel toggle
