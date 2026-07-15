@@ -51,8 +51,11 @@
     font-size: 12px;
     line-height: 1.7;
   }
-  .legend div { display: flex; align-items: center; gap: 6px; }
+  .legend .legend-title { font-weight: 700; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.03em; color: #888; margin: 4px 0 2px; }
+  .legend .legend-title:first-child { margin-top: 0; }
+  .legend div.row { display: flex; align-items: center; gap: 6px; }
   .dot { width: 11px; height: 11px; border-radius: 50%; display: inline-block; border: 1px solid rgba(0,0,0,0.3); flex-shrink: 0; }
+  .sq { width: 10px; height: 10px; border-radius: 3px; display: inline-block; border: 1px solid rgba(0,0,0,0.3); flex-shrink: 0; }
   .status {
     position: absolute;
     bottom: 10px;
@@ -74,6 +77,7 @@
     padding: 1px 6px;
     border-radius: 10px;
     margin-top: 4px;
+    margin-right: 4px;
   }
 
   /* Species filter panel */
@@ -176,15 +180,52 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.js"></script>
 <script>
-const categoryColors = {
+// Marker fill color is driven by Origin (where the plant is from).
+const originColors = {
   native: '#3a7d44',
   invasive: '#c1440e',
-  weed: '#d4a017',
-  ornamental: '#8e44ad',
+  naturalized: '#d4a017',
   unsure: '#7f8c8d'
 };
 
-// Deterministic per-species color (independent of category), so overlapping
+// Type badge color (what kind of plant it is) — shown as a second tag in the popup
+// and usable later for a type-based filter if desired.
+const typeColors = {
+  weed: '#d4a017',
+  tree: '#2e6b3e',
+  shrub: '#4a7fb5',
+  ornamental: '#8e44ad',
+  other: '#7f8c8d'
+};
+
+// Normalizes a sighting so old exports (single "category" field) and new
+// exports ("origin" + "type" fields) both work without breaking the map.
+function normalize(s) {
+  let origin = (s.origin || '').toLowerCase();
+  let type = (s.type || '').toLowerCase();
+  if (!origin && !type && s.category) {
+    // Legacy single-category export: map old category -> best-guess origin/type.
+    const cat = s.category.toLowerCase();
+    if (cat === 'native' || cat === 'invasive') {
+      origin = cat;
+      type = 'other';
+    } else if (cat === 'weed') {
+      origin = 'unsure';
+      type = 'weed';
+    } else if (cat === 'ornamental') {
+      origin = 'unsure';
+      type = 'ornamental';
+    } else {
+      origin = 'unsure';
+      type = 'other';
+    }
+  }
+  if (!origin) origin = 'unsure';
+  if (!type) type = 'other';
+  return Object.assign({}, s, { origin, type });
+}
+
+// Deterministic per-species color (independent of origin/type), so overlapping
 // range outlines for different plants are visually distinguishable.
 const speciesColorCache = {};
 function speciesColor(name) {
@@ -210,9 +251,15 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 const legend = L.control({ position: 'topright' });
 legend.onAdd = function () {
   const div = L.DomUtil.create('div', 'legend');
-  div.innerHTML = Object.entries(categoryColors).map(([cat, color]) =>
-    `<div><span class="dot" style="background:${color}"></span>${cat}</div>`
+  const originRows = Object.entries(originColors).map(([o, color]) =>
+    `<div class="row"><span class="dot" style="background:${color}"></span>${o}</div>`
   ).join('');
+  const typeRows = Object.entries(typeColors).map(([t, color]) =>
+    `<div class="row"><span class="sq" style="background:${color}"></span>${t}</div>`
+  ).join('');
+  div.innerHTML =
+    `<div class="legend-title">Origin (dot color)</div>${originRows}` +
+    `<div class="legend-title">Type (popup tag)</div>${typeRows}`;
   return div;
 };
 legend.addTo(map);
@@ -223,7 +270,7 @@ let markerLayer = L.layerGroup().addTo(map);
 
 const STORAGE_KEY = 'floraLogData';
 
-let allSightings = [];          // full dataset as loaded
+let allSightings = [];          // full dataset as loaded (normalized)
 let activeSpecies = new Set();  // species currently shown
 let showRanges = true;          // range-polygon toggle
 
@@ -344,10 +391,11 @@ function redrawMarkers() {
   }
 
   visible.forEach(s => {
-    const color = categoryColors[s.category] || '#555';
+    const originColor = originColors[s.origin] || '#555';
+    const typeColor = typeColors[s.type] || '#555';
     const marker = L.circleMarker([s.lat, s.lng], {
       radius: 9,
-      fillColor: color,
+      fillColor: originColor,
       color: '#222',
       weight: 1,
       fillOpacity: 0.85
@@ -355,8 +403,9 @@ function redrawMarkers() {
     marker.bindPopup(`
       <b>${s.species}</b>
       ${s.date || ''}<br>
-      ${s.notes || ''}
-      <span class="cat-tag" style="background:${color}22; color:${color}; border:1px solid ${color}66;">${s.category}</span>
+      ${s.notes || ''}<br>
+      <span class="cat-tag" style="background:${originColor}22; color:${originColor}; border:1px solid ${originColor}66;">${s.origin}</span>
+      <span class="cat-tag" style="background:${typeColor}22; color:${typeColor}; border:1px solid ${typeColor}66;">${s.type}</span>
     `);
     markerLayer.addLayer(marker);
   });
@@ -367,9 +416,9 @@ function redrawMarkers() {
 }
 
 function renderData(sightings) {
-  allSightings = sightings;
+  allSightings = sightings.map(normalize);
   activeSpecies = new Set(); // reset so buildSpeciesPanel defaults to "all" for a fresh load
-  const withCoords = sightings.filter(s => typeof s.lat === 'number' && typeof s.lng === 'number');
+  const withCoords = allSightings.filter(s => typeof s.lat === 'number' && typeof s.lng === 'number');
 
   buildSpeciesPanel(withCoords);
   redrawMarkers();
